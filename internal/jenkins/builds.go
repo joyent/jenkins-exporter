@@ -27,6 +27,7 @@ type buildRawResp struct {
 
 type jobRawResp struct {
 	Name              string          `json:"name"`
+	FullName          string          `json:"fullName"`
 	WorkflowJobBuilds []*buildRawResp `json:"builds"`
 	MultiBranchJobs   []*jobRawResp   `json:"jobs"`
 }
@@ -38,6 +39,7 @@ type respRaw struct {
 type Build struct {
 	JobName            string
 	MultiBranchJobName string
+	FullName           string // Full hierarchical path
 	ID                 int64
 	BuildableTime      time.Duration
 	WaitingTime        time.Duration
@@ -54,6 +56,11 @@ type Build struct {
 }
 
 func (b *Build) FullJobName() string {
+	// Use FullName from Jenkins API if available
+	if b.FullName != "" {
+		return b.FullName
+	}
+	// Fallback to legacy behavior for backwards compatibility
 	if b.MultiBranchJobName != "" {
 		return b.MultiBranchJobName + "/" + b.JobName
 	}
@@ -76,7 +83,7 @@ func (b *buildRawResp) validate() error {
 	return nil
 }
 
-func (c *Client) buildRawToBuild(workflowJobName, multibranchJobName string, rawBuild *buildRawResp) (*Build, error) {
+func (c *Client) buildRawToBuild(workflowJobName, multibranchJobName, fullName string, rawBuild *buildRawResp) (*Build, error) {
 	const metricClass = "jenkins.metrics.impl.TimeInQueueAction"
 
 	for _, a := range rawBuild.Actions {
@@ -92,6 +99,7 @@ func (c *Client) buildRawToBuild(workflowJobName, multibranchJobName string, raw
 		b := Build{
 			JobName:            workflowJobName,
 			MultiBranchJobName: multibranchJobName,
+			FullName:           fullName,
 			ID:                 int64(intID),
 			BuildableTime:      time.Duration(a.BuildableTimeMillis) * time.Millisecond,
 			WaitingTime:        time.Duration(a.WaitingTimeMillis) * time.Millisecond,
@@ -108,51 +116,54 @@ func (c *Client) buildRawToBuild(workflowJobName, multibranchJobName string, raw
 	return nil, errors.New("could not find metrics in Actions slice")
 }
 
-func buildID(job *jobRawResp, build *buildRawResp) string {
-	return fmt.Sprintf("%s/%s", job.Name, build.ID)
-}
-func multibranchBuildID(multibranchJob, job *jobRawResp, build *buildRawResp) string {
-	return fmt.Sprintf("%s/%s/%s", multibranchJob.Name, job.Name, build.ID)
-}
-
-func (c *Client) respRawToBuilds(raw *respRaw) []*Build {
+// processJobs recursively processes jobs at any nesting level
+func (c *Client) processJobs(jobs []*jobRawResp, parentFullName string, parentName string) []*Build {
 	var res []*Build
 
-	for _, job := range raw.Jobs {
+	for _, job := range jobs {
+		// Determine the full path for this job
+		fullName := job.FullName
+		if fullName == "" {
+			// Fallback: build path from parent
+			if parentFullName != "" {
+				fullName = parentFullName + "/" + job.Name
+			} else {
+				fullName = job.Name
+			}
+		}
+
+		// Process builds if this job has any (it's a buildable job/leaf node)
 		for _, rawBuild := range job.WorkflowJobBuilds {
 			if err := rawBuild.validate(); err != nil {
-				c.logger.Printf("skipping build %s: %s", buildID(job, rawBuild), err)
+				c.logger.Printf("skipping build %s/%s: %s", fullName, rawBuild.ID, err)
 				continue
 			}
 
-			b, err := c.buildRawToBuild(job.Name, "", rawBuild)
+			// Determine MultiBranchJobName (parent) and JobName (current)
+			multiBranchJobName := parentName
+			jobName := job.Name
+
+			b, err := c.buildRawToBuild(jobName, multiBranchJobName, fullName, rawBuild)
 			if err != nil {
-				c.logger.Printf("skipping build %s: %s", buildID(job, rawBuild), err)
+				c.logger.Printf("skipping build %s/%s: %s", fullName, rawBuild.ID, err)
 				continue
 			}
 
 			res = append(res, b)
 		}
 
-		for _, multibranchJob := range job.MultiBranchJobs {
-			for _, rawBuild := range multibranchJob.WorkflowJobBuilds {
-				if err := rawBuild.validate(); err != nil {
-					c.logger.Printf("skipping build %s: %s", multibranchBuildID(multibranchJob, job, rawBuild), err)
-					continue
-				}
-
-				b, err := c.buildRawToBuild(multibranchJob.Name, job.Name, rawBuild)
-				if err != nil {
-					c.logger.Printf("skipping build %s: %s", multibranchBuildID(multibranchJob, job, rawBuild), err)
-					continue
-				}
-
-				res = append(res, b)
-			}
+		// Recursively process nested jobs (folders/multibranch projects)
+		if len(job.MultiBranchJobs) > 0 {
+			nestedBuilds := c.processJobs(job.MultiBranchJobs, fullName, job.Name)
+			res = append(res, nestedBuilds...)
 		}
 	}
 
 	return res
+}
+
+func (c *Client) respRawToBuilds(raw *respRaw) []*Build {
+	return c.processJobs(raw.Jobs, "", "")
 }
 
 func (c *Client) Builds() ([]*Build, error) {
@@ -160,9 +171,16 @@ func (c *Client) Builds() ([]*Build, error) {
 	// _class = "jenkins.metrics.impl.TimeInQueueAction" that contains the
 	// metrics?
 	const queryBuilds = "builds[id,result,building,actions[_class,buildableTimeMillis,waitingTimeMillis,blockedTimeMillis,executingTimeMillis,buildingDurationMillis]]"
+
+	// Extended tree query to support up to 4 levels of folder nesting
+	// This handles structures like: Folder/Subfolder/Project/Branch (up to 4 levels deep)
 	const endpoint = "api/json" +
-		"?tree=jobs[name,jobs[name," + queryBuilds + "]," + // multibranch jobs contain a job array that contain the builds
-		queryBuilds + // workflow jobs contain the builds in the top-level job
+		"?tree=jobs[name,fullName," +
+		"jobs[name,fullName," +
+		"jobs[name,fullName," +
+		"jobs[name,fullName," + queryBuilds + "]," + queryBuilds +
+		"]," + queryBuilds +
+		"]," + queryBuilds +
 		"]"
 
 	var resp respRaw
