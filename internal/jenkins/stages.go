@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -39,18 +40,34 @@ func respWFAPIRawToStages(resp *respWFAPIRaw) []*Stage {
 	return res
 }
 
-func (c *Client) wfapiJobBuildURL(jobName, multibranchJobName, buildID string) (string, error) {
-	if multibranchJobName == "" {
-		return url.JoinPath(c.serverURL, "job", jobName, buildID, "wfapi")
+func (c *Client) wfapiJobBuildURL(fullName string, buildID string) (string, error) {
+	// Convert "A/B/C/D" to "job/A/job/B/job/C/job/D"
+	var parts []string
+	for _, part := range splitPath(fullName) {
+		parts = append(parts, "job", part)
 	}
-
-	return url.JoinPath(c.serverURL, "job", multibranchJobName, "job", jobName, buildID, "wfapi")
+	parts = append(parts, buildID, "wfapi")
+	return url.JoinPath(c.serverURL, parts...)
 }
 
-func (c *Client) Stages(jobName, multibranchJobName string, buildID int64) ([]*Stage, error) {
+func splitPath(fullName string) []string {
+	if fullName == "" {
+		return nil
+	}
+	// Split by "/" to handle multi-level paths
+	var result []string
+	for _, part := range strings.Split(fullName, "/") {
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
+}
+
+func (c *Client) Stages(fullName string, buildID int64) ([]*Stage, error) {
 	var resp respWFAPIRaw
 
-	wfapiURL, err := c.wfapiJobBuildURL(jobName, multibranchJobName, fmt.Sprint(buildID))
+	wfapiURL, err := c.wfapiJobBuildURL(fullName, fmt.Sprint(buildID))
 	if err != nil {
 		return nil, err
 	}

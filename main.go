@@ -137,16 +137,14 @@ func recordJobDurationMetric(m *jenkinsexporter.Metrics, jobName, branchLabel, m
 	m.JobDuration.With(labels).Observe(float64(duration / time.Second))
 }
 
-// metricJobName returns the value of the job label used in metrics.
-// If multibranchJobName is not empty, it is used as label value, otherwise
-// jobName.
+// metricJobName returns the leaf job name (rightmost component of the path)
 func metricJobName(b *jenkins.Build) string {
-	return b.FullJobName()
+	return b.JobName
 }
 
-// jenkinsFolderName returns the folder/multibranch job name
+// jenkinsFolderName returns the full folder path (everything except the leaf job name)
 func jenkinsFolderName(b *jenkins.Build) string {
-	return b.MultiBranchJobName
+	return b.FolderPath()
 }
 
 // jenkinsIndividualJobName returns the individual job name
@@ -237,12 +235,6 @@ func recordBuildStageJobInAllowList(b *jenkins.Build) bool {
 }
 
 func recordMetrics(clt *jenkins.Client, metrics *jenkinsexporter.Metrics, b *jenkins.Build, recordJobMetrics, recordperStageMetrics bool) {
-	// Enrich build with environment variables if enabled
-	if *enableBuildEnvExtraction && recordJobMetrics {
-		if err := clt.EnrichBuildWithEnvVars(b); err != nil {
-			logger.Printf("Warning: failed to enrich build %s with environment variables: %v", b.String(), err)
-		}
-	}
 
 	if recordJobMetrics {
 		recordBuildMetric(metrics, b)
@@ -360,9 +352,14 @@ func fetchAndRecord(clt *jenkins.Client, stateStore *store.Store, onlyRecordNewb
 }
 
 func fetchAndRecordStageMetric(clt *jenkins.Client, metrics *jenkinsexporter.Metrics, b *jenkins.Build) {
-	stages, err := clt.Stages(b.JobName, b.MultiBranchJobName, b.ID)
+	stages, err := clt.Stages(b.FullName, b.ID)
 	if err != nil {
-		logger.Printf("retrieving stage information for job: %q, multibranchJob: %q, buildID: %d, failed: %s", b.JobName, b.MultiBranchJobName, b.ID, err)
+		// Check if it's a 404 (job doesn't expose workflow API)
+		if httpErr, ok := err.(*jenkins.ErrHTTPRequestFailed); ok && httpErr.Code == 404 {
+			debugLogger.Printf("%s: build does not expose workflow API endpoint (this is normal for non-pipeline jobs)", b.String())
+			return
+		}
+		logger.Printf("retrieving stage information for build %s failed: %s", b.String(), err)
 		metrics.Errors.WithLabelValues("jenkins_wfapi").Inc()
 		return
 	}

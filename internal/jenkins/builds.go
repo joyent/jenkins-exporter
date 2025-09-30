@@ -10,12 +10,19 @@ import (
 
 // https://github.com/jenkinsci/metrics-plugin/blob/master/src/main/java/jenkins/metrics/impl/TimeInQueueAction.java#L85
 type actionRawResp struct {
-	Class                  string `json:"_class"`
-	WaitingTimeMillis      int64  `json:"waitingTimeMillis"`
-	BuildableTimeMillis    int64  `json:"buildableTimeMillis"`
-	BlockedTimeMillis      int64  `json:"blockedTimeMillis"`
-	ExecutingTimeMillis    int64  `json:"executingTimeMillis"`
-	BuildingDurationMillis int64  `json:"buildingDurationMillis"`
+	Class                  string   `json:"_class"`
+	WaitingTimeMillis      int64    `json:"waitingTimeMillis"`
+	BuildableTimeMillis    int64    `json:"buildableTimeMillis"`
+	BlockedTimeMillis      int64    `json:"blockedTimeMillis"`
+	ExecutingTimeMillis    int64    `json:"executingTimeMillis"`
+	BuildingDurationMillis int64    `json:"buildingDurationMillis"`
+	RemoteUrls             []string `json:"remoteUrls"`
+	LastBuiltRevision      *struct {
+		SHA1   string `json:"SHA1"`
+		Branch []struct {
+			Name string `json:"name"`
+		} `json:"branch"`
+	} `json:"lastBuiltRevision"`
 }
 
 type buildRawResp struct {
@@ -48,7 +55,7 @@ type Build struct {
 	BuildingDuration   time.Duration
 	Result             string
 	Building           bool
-	// Build-level environment variables
+	// Git metadata extracted from build actions
 	GitURL       string
 	GitBranch    string
 	GitCommit    string
@@ -65,6 +72,18 @@ func (b *Build) FullJobName() string {
 		return b.MultiBranchJobName + "/" + b.JobName
 	}
 	return b.JobName
+}
+
+// FolderPath returns the full folder path (everything except the leaf job name)
+func (b *Build) FolderPath() string {
+	fullName := b.FullJobName()
+	// Find the last slash to separate folder path from job name
+	lastSlash := strings.LastIndex(fullName, "/")
+	if lastSlash == -1 {
+		// No folders, just a root-level job
+		return ""
+	}
+	return fullName[:lastSlash]
 }
 
 func (b *Build) String() string {
@@ -85,35 +104,61 @@ func (b *buildRawResp) validate() error {
 
 func (c *Client) buildRawToBuild(workflowJobName, multibranchJobName, fullName string, rawBuild *buildRawResp) (*Build, error) {
 	const metricClass = "jenkins.metrics.impl.TimeInQueueAction"
+	const gitClass = "hudson.plugins.git.util.BuildData"
+
+	var metricsFound bool
+	var b Build
 
 	for _, a := range rawBuild.Actions {
-		if a.Class != metricClass {
+		if a == nil {
 			continue
 		}
 
-		intID, err := strconv.Atoi(rawBuild.ID)
-		if err != nil {
-			return nil, fmt.Errorf("could not convert id '%s' to int64", rawBuild.ID)
+		// Extract metrics data
+		if a.Class == metricClass {
+			intID, err := strconv.Atoi(rawBuild.ID)
+			if err != nil {
+				return nil, fmt.Errorf("could not convert id '%s' to int64", rawBuild.ID)
+			}
+
+			b = Build{
+				JobName:            workflowJobName,
+				MultiBranchJobName: multibranchJobName,
+				FullName:           fullName,
+				ID:                 int64(intID),
+				BuildableTime:      time.Duration(a.BuildableTimeMillis) * time.Millisecond,
+				WaitingTime:        time.Duration(a.WaitingTimeMillis) * time.Millisecond,
+				BlockedTime:        time.Duration(a.BlockedTimeMillis) * time.Millisecond,
+				ExecutingTime:      time.Duration(a.ExecutingTimeMillis) * time.Millisecond,
+				BuildingDuration:   time.Duration(a.BuildingDurationMillis) * time.Millisecond,
+				Result:             rawBuild.Result,
+				Building:           *rawBuild.Building,
+			}
+			metricsFound = true
 		}
 
-		b := Build{
-			JobName:            workflowJobName,
-			MultiBranchJobName: multibranchJobName,
-			FullName:           fullName,
-			ID:                 int64(intID),
-			BuildableTime:      time.Duration(a.BuildableTimeMillis) * time.Millisecond,
-			WaitingTime:        time.Duration(a.WaitingTimeMillis) * time.Millisecond,
-			BlockedTime:        time.Duration(a.BlockedTimeMillis) * time.Millisecond,
-			ExecutingTime:      time.Duration(a.ExecutingTimeMillis) * time.Millisecond,
-			BuildingDuration:   time.Duration(a.BuildingDurationMillis) * time.Millisecond,
-			Result:             rawBuild.Result,
-			Building:           *rawBuild.Building,
+		// Extract Git data
+		if a.Class == gitClass {
+			if len(a.RemoteUrls) > 0 {
+				b.GitURL = a.RemoteUrls[0]
+				b.RepoName = extractRepoName(a.RemoteUrls[0])
+			}
+			if a.LastBuiltRevision != nil {
+				b.GitCommit = a.LastBuiltRevision.SHA1
+				if len(a.LastBuiltRevision.Branch) > 0 {
+					// Remove "refs/remotes/origin/" prefix
+					branchName := a.LastBuiltRevision.Branch[0].Name
+					b.GitBranch = strings.TrimPrefix(branchName, "refs/remotes/origin/")
+				}
+			}
 		}
-
-		return &b, nil
 	}
 
-	return nil, errors.New("could not find metrics in Actions slice")
+	if !metricsFound {
+		return nil, errors.New("could not find metrics in Actions slice")
+	}
+
+	return &b, nil
 }
 
 // processJobs recursively processes jobs at any nesting level
@@ -170,7 +215,7 @@ func (c *Client) Builds() ([]*Build, error) {
 	// TODO: is it possible to retrieve only the element in actions with
 	// _class = "jenkins.metrics.impl.TimeInQueueAction" that contains the
 	// metrics?
-	const queryBuilds = "builds[id,result,building,actions[_class,buildableTimeMillis,waitingTimeMillis,blockedTimeMillis,executingTimeMillis,buildingDurationMillis]]"
+	const queryBuilds = "builds[id,result,building,actions[_class,buildableTimeMillis,waitingTimeMillis,blockedTimeMillis,executingTimeMillis,buildingDurationMillis,remoteUrls,lastBuiltRevision[SHA1,branch[name]]]]"
 
 	// Extended tree query to support up to 4 levels of folder nesting
 	// This handles structures like: Folder/Subfolder/Project/Branch (up to 4 levels deep)
@@ -192,11 +237,6 @@ func (c *Client) Builds() ([]*Build, error) {
 	builds := c.respRawToBuilds(&resp)
 
 	return builds, nil
-}
-
-// BuildEnvVars represents the environment variables for a specific build
-type buildEnvVarsResp struct {
-	EnvMap map[string]string `json:"envMap"`
 }
 
 // extractRepoName extracts repository name from Git URL
@@ -228,48 +268,4 @@ func extractRepoName(gitURL string) string {
 	}
 
 	return ""
-}
-
-// BuildEnvVars fetches environment variables for a specific build
-func (c *Client) BuildEnvVars(jobName, multiBranchJobName string, buildID int64) (*buildEnvVarsResp, error) {
-	var endpoint string
-	if multiBranchJobName != "" {
-		// Multibranch pipeline: /job/{multibranch-job}/job/{branch-job}/{build-id}/injectedEnvVars/api/json
-		endpoint = fmt.Sprintf("job/%s/job/%s/%d/injectedEnvVars/api/json", multiBranchJobName, jobName, buildID)
-	} else {
-		// Regular pipeline: /job/{job-name}/{build-id}/injectedEnvVars/api/json
-		endpoint = fmt.Sprintf("job/%s/%d/injectedEnvVars/api/json", jobName, buildID)
-	}
-
-	var resp buildEnvVarsResp
-	err := c.do("GET", c.serverURL+endpoint, &resp)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch environment variables for build %s/%d: %w", jobName, buildID, err)
-	}
-
-	return &resp, nil
-}
-
-// EnrichBuildWithEnvVars adds environment variable information to a build
-func (c *Client) EnrichBuildWithEnvVars(build *Build) error {
-	envVars, err := c.BuildEnvVars(build.JobName, build.MultiBranchJobName, build.ID)
-	if err != nil {
-		// Log error but don't fail the entire build processing
-		c.logger.Printf("Warning: could not fetch environment variables for build %s: %v", build.String(), err)
-		return nil
-	}
-
-	// Extract Git-related environment variables
-	if gitURL, ok := envVars.EnvMap["GIT_URL"]; ok {
-		build.GitURL = gitURL
-		build.RepoName = extractRepoName(gitURL)
-	}
-	if gitBranch, ok := envVars.EnvMap["GIT_BRANCH"]; ok {
-		build.GitBranch = gitBranch
-	}
-	if gitCommit, ok := envVars.EnvMap["GIT_COMMIT"]; ok {
-		build.GitCommit = gitCommit
-	}
-
-	return nil
 }
