@@ -110,14 +110,14 @@ func recordJobDurationMetric(m *jenkinsexporter.Metrics, jobName, branchLabel, m
 	buildNumber := ""
 	jenkinsFolder := ""
 	jenkinsJobName := ""
-	jenkinsJobFullName := ""
+	jobFullName := ""
 
 	if build != nil {
 		repoName = build.RepoName
 		buildNumber = fmt.Sprintf("%d", build.ID)
 		jenkinsFolder = jenkinsFolderName(build)
 		jenkinsJobName = jenkinsIndividualJobName(build)
-		jenkinsJobFullName = jenkinsJobFullName(build)
+		jobFullName = jenkinsJobFullName(build)
 	}
 
 	labels := map[string]string{
@@ -126,7 +126,7 @@ func recordJobDurationMetric(m *jenkinsexporter.Metrics, jobName, branchLabel, m
 		"jenkins_job":          jobName,
 		"jenkins_folder":       jenkinsFolder,
 		"jenkins_job_name":     jenkinsJobName,
-		"jenkins_job_fullname": jenkinsJobFullName,
+		"jenkins_job_fullname": jobFullName,
 		"type":                 metricType,
 		"result":               strings.ToLower(buildResult),
 		"branch":               branchLabel,
@@ -398,7 +398,7 @@ func recordStagesMetric(metrics *jenkinsexporter.Metrics, b *jenkins.Build, stag
 	metricJobName := metricJobName(b)
 	jenkinsFolder := jenkinsFolderName(b)
 	jenkinsJobName := jenkinsIndividualJobName(b)
-	jenkinsJobFullName := jenkinsJobFullName(b)
+	jobFullName := jenkinsJobFullName(b)
 
 	for _, stage := range stages {
 		if !stageIsInAllowList(metricJobName, stage.Name) {
@@ -422,7 +422,7 @@ func recordStagesMetric(metrics *jenkinsexporter.Metrics, b *jenkins.Build, stag
 			"jenkins_job":          metricJobName,
 			"jenkins_folder":       jenkinsFolder,
 			"jenkins_job_name":     jenkinsJobName,
-			"jenkins_job_fullname": jenkinsJobFullName,
+			"jenkins_job_fullname": jobFullName,
 			"result":               strings.ToLower(stage.Status),
 			"stage":                stage.Name,
 			"type":                 "duration",

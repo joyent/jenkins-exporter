@@ -16,6 +16,6 @@ WORKDIR /app
 
 COPY --from=builder /app/jenkins-exporter .
 
-EXPOSE 8123
+EXPOSE 9506
 
 CMD ["./jenkins-exporter"]

@@ -4,11 +4,12 @@ services:
 	jenkins-exporter:
 		build: .
 		ports:
-			- "8123:8123"
+			- "9506:9506"
 		environment:
 			- JE_JENKINS_URL=${JENKINS_URL:-http://jenkins:8080}
 			- JE_JENKINS_USER=${JENKINS_USER:-admin}
 			- JE_JENKINS_PASSWORD=${JENKINS_PASSWORD:-admin}
+			- JE_LISTEN_ADDR=:9506
 			- JE_ENABLE_BUILD_ENV_EXTRACTION=true
 			- JE_BUILD_HISTORY_LIMIT=5
 			- JE_POLL_INTERVAL=30s
