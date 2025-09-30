@@ -85,6 +85,10 @@ var (
 	recordBuildStageJobAllowList  = cli.BuildStageMapFlag{}
 	branchLabelAllowList          = cli.MapStrMapStrFlag{}
 
+	// New flags for build-level environment variable extraction
+	enableBuildEnvExtraction = flag.Bool("enable-build-env-extraction", false, "Enable extraction of build-level environment variables (GIT_URL, GIT_BRANCH, etc.)")
+	buildHistoryLimit        = flag.Int("build-history-limit", 5, "Number of recent builds per job to process for environment variable extraction")
+
 	printVersion = flag.Bool("version", false, "print the version and exit")
 	debug        = flag.Bool("debug", false, "enable debug mode")
 )
@@ -100,14 +104,25 @@ func init() {
 			"Specifies multibranch job and branch names for which a branch label is recorded.")
 }
 
-func recordJobDurationMetric(m *jenkinsexporter.Metrics, jobName, branchLabel, metricType, buildResult string, duration time.Duration) {
+func recordJobDurationMetric(m *jenkinsexporter.Metrics, jobName, branchLabel, metricType, buildResult string, duration time.Duration, build *jenkins.Build) {
+	// Always provide all required labels
+	repoName := ""
+	buildNumber := ""
+
+	if build != nil {
+		repoName = build.RepoName
+		buildNumber = fmt.Sprintf("%d", build.ID)
+	}
+
 	labels := map[string]string{
 		// The label "job" is already used by Prometheus and
 		// applied to all scrape targets.
-		"jenkins_job": jobName,
-		"type":        metricType,
-		"result":      strings.ToLower(buildResult),
-		"branch":      branchLabel,
+		"jenkins_job":  jobName,
+		"type":         metricType,
+		"result":       strings.ToLower(buildResult),
+		"branch":       branchLabel,
+		"repo_name":    repoName,
+		"build_number": buildNumber,
 	}
 
 	m.JobDuration.With(labels).Observe(float64(duration / time.Second))
@@ -136,19 +151,19 @@ func recordBuildMetric(c *jenkinsexporter.Metrics, b *jenkins.Build) {
 	// chars
 
 	if *recordBlockedTime {
-		recordJobDurationMetric(c, jobName, branchLabel, "blocked_time", b.Result, b.BlockedTime)
+		recordJobDurationMetric(c, jobName, branchLabel, "blocked_time", b.Result, b.BlockedTime, b)
 	}
 	if *recordBuildAbleTime {
-		recordJobDurationMetric(c, jobName, branchLabel, "buildable_time", b.Result, b.BuildableTime)
+		recordJobDurationMetric(c, jobName, branchLabel, "buildable_time", b.Result, b.BuildableTime, b)
 	}
 	if *recordBuildingDuration {
-		recordJobDurationMetric(c, jobName, branchLabel, "building_duration", b.Result, b.BuildingDuration)
+		recordJobDurationMetric(c, jobName, branchLabel, "building_duration", b.Result, b.BuildingDuration, b)
 	}
 	if *recordExecutionTime {
-		recordJobDurationMetric(c, jobName, branchLabel, "executing_time", b.Result, b.ExecutingTime)
+		recordJobDurationMetric(c, jobName, branchLabel, "executing_time", b.Result, b.ExecutingTime, b)
 	}
 	if *recordWaitingTime {
-		recordJobDurationMetric(c, jobName, branchLabel, "waiting_time", b.Result, b.WaitingTime)
+		recordJobDurationMetric(c, jobName, branchLabel, "waiting_time", b.Result, b.WaitingTime, b)
 	}
 
 	logger.Printf("recorded metrics for build %s", b.String())
@@ -201,6 +216,13 @@ func recordBuildStageJobInAllowList(b *jenkins.Build) bool {
 }
 
 func recordMetrics(clt *jenkins.Client, metrics *jenkinsexporter.Metrics, b *jenkins.Build, recordJobMetrics, recordperStageMetrics bool) {
+	// Enrich build with environment variables if enabled
+	if *enableBuildEnvExtraction && recordJobMetrics {
+		if err := clt.EnrichBuildWithEnvVars(b); err != nil {
+			logger.Printf("Warning: failed to enrich build %s with environment variables: %v", b.String(), err)
+		}
+	}
+
 	if recordJobMetrics {
 		recordBuildMetric(metrics, b)
 	}
@@ -458,6 +480,8 @@ func logConfiguration() {
 	str += fmt.Sprintf(fmtSpec, "Ignore Unsuccessful Build Stages", *ignoreUnsuccessfulBuildStages)
 	str += fmt.Sprintf(fmtSpec, "Build Stage Allowlist", recordBuildStageJobAllowList.String())
 	str += fmt.Sprintf(fmtSpec, "Branch Label Allowlist", branchLabelAllowList.String())
+	str += fmt.Sprintf(fmtSpec, "Enable Build Env Extraction", *enableBuildEnvExtraction)
+	str += fmt.Sprintf(fmtSpec, "Build History Limit", *buildHistoryLimit)
 
 	logger.Printf(str)
 }

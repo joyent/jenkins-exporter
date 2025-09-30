@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -45,6 +46,11 @@ type Build struct {
 	BuildingDuration   time.Duration
 	Result             string
 	Building           bool
+	// Build-level environment variables
+	GitURL       string
+	GitBranch    string
+	GitCommit    string
+	RepoName     string
 }
 
 func (b *Build) FullJobName() string {
@@ -168,4 +174,84 @@ func (c *Client) Builds() ([]*Build, error) {
 	builds := c.respRawToBuilds(&resp)
 
 	return builds, nil
+}
+
+// BuildEnvVars represents the environment variables for a specific build
+type buildEnvVarsResp struct {
+	EnvMap map[string]string `json:"envMap"`
+}
+
+// extractRepoName extracts repository name from Git URL
+func extractRepoName(gitURL string) string {
+	if gitURL == "" {
+		return ""
+	}
+
+	// Remove .git suffix if present
+	url := strings.TrimSuffix(gitURL, ".git")
+
+	// Handle different URL formats:
+	// https://github.com/org/repo -> repo
+	// git@github.com:org/repo -> repo
+	var parts []string
+	if strings.Contains(url, "/") {
+		parts = strings.Split(url, "/")
+	} else if strings.Contains(url, ":") {
+		// Handle SSH format git@host:org/repo
+		colonIndex := strings.LastIndex(url, ":")
+		if colonIndex != -1 {
+			path := url[colonIndex+1:]
+			parts = strings.Split(path, "/")
+		}
+	}
+
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+
+	return ""
+}
+
+// BuildEnvVars fetches environment variables for a specific build
+func (c *Client) BuildEnvVars(jobName, multiBranchJobName string, buildID int64) (*buildEnvVarsResp, error) {
+	var endpoint string
+	if multiBranchJobName != "" {
+		// Multibranch pipeline: /job/{multibranch-job}/job/{branch-job}/{build-id}/injectedEnvVars/api/json
+		endpoint = fmt.Sprintf("job/%s/job/%s/%d/injectedEnvVars/api/json", multiBranchJobName, jobName, buildID)
+	} else {
+		// Regular pipeline: /job/{job-name}/{build-id}/injectedEnvVars/api/json
+		endpoint = fmt.Sprintf("job/%s/%d/injectedEnvVars/api/json", jobName, buildID)
+	}
+
+	var resp buildEnvVarsResp
+	err := c.do("GET", c.serverURL+endpoint, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch environment variables for build %s/%d: %w", jobName, buildID, err)
+	}
+
+	return &resp, nil
+}
+
+// EnrichBuildWithEnvVars adds environment variable information to a build
+func (c *Client) EnrichBuildWithEnvVars(build *Build) error {
+	envVars, err := c.BuildEnvVars(build.JobName, build.MultiBranchJobName, build.ID)
+	if err != nil {
+		// Log error but don't fail the entire build processing
+		c.logger.Printf("Warning: could not fetch environment variables for build %s: %v", build.String(), err)
+		return nil
+	}
+
+	// Extract Git-related environment variables
+	if gitURL, ok := envVars.EnvMap["GIT_URL"]; ok {
+		build.GitURL = gitURL
+		build.RepoName = extractRepoName(gitURL)
+	}
+	if gitBranch, ok := envVars.EnvMap["GIT_BRANCH"]; ok {
+		build.GitBranch = gitBranch
+	}
+	if gitCommit, ok := envVars.EnvMap["GIT_COMMIT"]; ok {
+		build.GitCommit = gitCommit
+	}
+
+	return nil
 }

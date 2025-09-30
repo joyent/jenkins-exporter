@@ -40,6 +40,8 @@ func MustNewMetrics(namespace string, buckets []float64) *Metrics {
 				"type",
 				"result",
 				"branch",
+				"repo_name",
+				"build_number",
 			},
 		),
 		Errors: prometheus.NewCounterVec(
