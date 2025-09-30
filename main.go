@@ -108,21 +108,30 @@ func recordJobDurationMetric(m *jenkinsexporter.Metrics, jobName, branchLabel, m
 	// Always provide all required labels
 	repoName := ""
 	buildNumber := ""
+	jenkinsFolder := ""
+	jenkinsJobName := ""
+	jenkinsJobFullName := ""
 
 	if build != nil {
 		repoName = build.RepoName
 		buildNumber = fmt.Sprintf("%d", build.ID)
+		jenkinsFolder = jenkinsFolderName(build)
+		jenkinsJobName = jenkinsIndividualJobName(build)
+		jenkinsJobFullName = jenkinsJobFullName(build)
 	}
 
 	labels := map[string]string{
 		// The label "job" is already used by Prometheus and
 		// applied to all scrape targets.
-		"jenkins_job":  jobName,
-		"type":         metricType,
-		"result":       strings.ToLower(buildResult),
-		"branch":       branchLabel,
-		"repo_name":    repoName,
-		"build_number": buildNumber,
+		"jenkins_job":          jobName,
+		"jenkins_folder":       jenkinsFolder,
+		"jenkins_job_name":     jenkinsJobName,
+		"jenkins_job_fullname": jenkinsJobFullName,
+		"type":                 metricType,
+		"result":               strings.ToLower(buildResult),
+		"branch":               branchLabel,
+		"repo_name":            repoName,
+		"build_number":         buildNumber,
 	}
 
 	m.JobDuration.With(labels).Observe(float64(duration / time.Second))
@@ -132,10 +141,22 @@ func recordJobDurationMetric(m *jenkinsexporter.Metrics, jobName, branchLabel, m
 // If multibranchJobName is not empty, it is used as label value, otherwise
 // jobName.
 func metricJobName(b *jenkins.Build) string {
-	if b.MultiBranchJobName != "" {
-		return b.MultiBranchJobName
-	}
+	return b.FullJobName()
+}
+
+// jenkinsFolderName returns the folder/multibranch job name
+func jenkinsFolderName(b *jenkins.Build) string {
+	return b.MultiBranchJobName
+}
+
+// jenkinsIndividualJobName returns the individual job name
+func jenkinsIndividualJobName(b *jenkins.Build) string {
 	return b.JobName
+}
+
+// jenkinsJobFullName returns the full job path
+func jenkinsJobFullName(b *jenkins.Build) string {
+	return b.FullJobName()
 }
 
 func recordBuildMetric(c *jenkinsexporter.Metrics, b *jenkins.Build) {
@@ -375,6 +396,10 @@ func recordStagesMetric(metrics *jenkinsexporter.Metrics, b *jenkins.Build, stag
 	}
 
 	metricJobName := metricJobName(b)
+	jenkinsFolder := jenkinsFolderName(b)
+	jenkinsJobName := jenkinsIndividualJobName(b)
+	jenkinsJobFullName := jenkinsJobFullName(b)
+
 	for _, stage := range stages {
 		if !stageIsInAllowList(metricJobName, stage.Name) {
 			continue
@@ -393,11 +418,14 @@ func recordStagesMetric(metrics *jenkinsexporter.Metrics, b *jenkins.Build, stag
 		}
 
 		labels := map[string]string{
-			"branch":      branchLabel,
-			"jenkins_job": metricJobName,
-			"result":      strings.ToLower(stage.Status),
-			"stage":       stage.Name,
-			"type":        "duration",
+			"branch":               branchLabel,
+			"jenkins_job":          metricJobName,
+			"jenkins_folder":       jenkinsFolder,
+			"jenkins_job_name":     jenkinsJobName,
+			"jenkins_job_fullname": jenkinsJobFullName,
+			"result":               strings.ToLower(stage.Status),
+			"stage":                stage.Name,
+			"type":                 "duration",
 		}
 
 		metrics.BuildStage.With(labels).Observe(float64(stage.Duration / time.Second))
