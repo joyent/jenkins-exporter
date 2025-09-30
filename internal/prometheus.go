@@ -24,6 +24,9 @@ func MustNewMetrics(namespace string, buckets []float64) *Metrics {
 			[]string{
 				"branch",
 				"jenkins_job",
+				"jenkins_folder",
+				"jenkins_job_name",
+				"jenkins_job_fullname",
 				"result",
 				"stage",
 				"type",
@@ -37,9 +40,14 @@ func MustNewMetrics(namespace string, buckets []float64) *Metrics {
 			},
 			[]string{
 				"jenkins_job",
+				"jenkins_folder",
+				"jenkins_job_name",
+				"jenkins_job_fullname",
 				"type",
 				"result",
 				"branch",
+				"repo_name",
+				"build_number",
 			},
 		),
 		Errors: prometheus.NewCounterVec(
